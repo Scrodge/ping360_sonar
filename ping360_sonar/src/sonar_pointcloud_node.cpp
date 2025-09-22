@@ -11,10 +11,19 @@ public:
   SonarPointCloudNode()
   : Node("sonar_pointcloud_node")
   {
-    // Subscribe to the LaserScan topic published by ping360_sonar
+    // Use sensor data QoS for compatibility with LaserScan publisher
+    auto qos = rclcpp::SensorDataQoS();
+    
+    //new one
     scan_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
-      "scan", 10,
+      "scan", qos,
       std::bind(&SonarPointCloudNode::scanCallback, this, std::placeholders::_1));
+
+    //old one
+    // Subscribe to the LaserScan topic published by ping360_sonar
+    // scan_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
+    //   "scan", 10,
+    //   std::bind(&SonarPointCloudNode::scanCallback, this, std::placeholders::_1));
 
     // Publisher for the PointCloud2 message
     cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("sonar_points", 10);

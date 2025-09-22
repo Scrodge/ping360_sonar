@@ -1,0 +1,9 @@
+qos_overrides./clock.subscription.depth: 1
+qos_overrides./clock.subscription.durability: volatile
+qos_overrides./clock.subscription.history: keep_last
+qos_overrides./clock.subscription.reliability: best_effort
+qos_overrides./parameter_events.publisher.depth: 1000
+qos_overrides./parameter_events.publisher.durability: volatile
+qos_overrides./parameter_events.publisher.history: keep_last
+qos_overrides./parameter_events.publisher.reliability: reliable
+use_sim_time: true
