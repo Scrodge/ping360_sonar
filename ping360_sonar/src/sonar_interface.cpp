@@ -77,6 +77,7 @@ std::pair<int, int> Ping360Interface::configureAngles(int aperture_deg, int step
     }
   }
 
+  //replaced
   angle_min = -best_half_aperture;
   angle_max = best_half_aperture;
   if(fullScan())
@@ -170,15 +171,30 @@ std::pair<bool, bool> Ping360Interface::read()
   if(real_sonar)
   {
     std::cout << device.transmit_duration << std::endl;
+   // --- Rotate frame by 180° (200 gradians) so 0° now points forward ---
+    int rotated_angle = angle + 200;
+    if (rotated_angle >= 400) rotated_angle -= 400;  // wrap within 0–400
+
     sonar->set_transducer(device.mode,
-                         device.gain_setting,
-                         angle > 0 ? angle : angle+400,
-                         device.transmit_duration,
-                         device.sample_period,
-                         device.transmit_frequency,
-                         device.number_of_samples,
-                         1,
-                         0);
+                        device.gain_setting,
+                        rotated_angle,
+                        device.transmit_duration,
+                        device.sample_period,
+                        device.transmit_frequency,
+                        device.number_of_samples,
+                        1,
+                        0);
+
+//replaced
+    // sonar->set_transducer(device.mode,
+    //                      device.gain_setting,
+    //                      angle > 0 ? angle : angle+400,
+    //                      device.transmit_duration,
+    //                      device.sample_period,
+    //                      device.transmit_frequency,
+    //                      device.number_of_samples,
+    //                      1,
+    //                      0);
     return {sonar->waitMessage(Ping360Id::DEVICE_DATA, timeout) != nullptr, end_turn};
   }
 

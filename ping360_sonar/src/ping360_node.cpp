@@ -1,4 +1,3 @@
-
 #include <ping360_sonar/ping360_node.h>
 #include <ping360_sonar/sector.h>
 #include <ping-message-common.h>
@@ -12,42 +11,124 @@ using std::vector;
 Ping360Sonar::Ping360Sonar(rclcpp::NodeOptions options)
   : Node("ping360", options)
 { 
-  // bounded parameters that are parsed later
-  declareParamDescription("gain", 0, "Sonar gain (0 = low, 1 = normal, 2 = high)", 0, 2);
-  declareParamDescription("frequency", 740, "Sonar operating frequency [kHz]", 650, 850);
-  declareParamDescription("range_max", 2, "Sonar max range [m]", 1, 50);
-  declareParamDescription("angle_sector", 360, "Scanned angular sector around sonar heading [degrees]. Will oscillate if not 360", 60, 360);
-  declareParamDescription("angle_step", 1, "Sonar angular resolution [degrees]", 1, 20);
-  declareParamDescription("image_size", 300, "Output image size [pixels]", 100, 1000, 2);
-  declareParamDescription("scan_threshold", 200, "Intensity threshold for LaserScan message", 1, 255);
-  declareParamDescription("speed_of_sound", 1500, "Speed of sound [m/s]", 1450, 1550);
-  declareParamDescription("image_rate", 100, "Image publishing rate [ms]", 50, 2000);
-  declareParamDescription("sonar_timeout", 8000, "Sonar timeout [ms]", 0, 20000);
-  declareParamDescription("transmit_duration", 50, "Acoustic transmission duration [us]", 5, 128); 
-  
-  // other, unbounded params
-  publish_image = declareParamDescription("publish_image", true, "Publish images on 'scan_image'");
-  publish_scan = declareParamDescription("publish_scan", false, "Publish laserscans on 'scan'");
-  publish_echo = declareParamDescription("publish_echo", false, "Publish raw echo on 'scan_echo'");
+  // bounded parameters declared with descriptors so rqt can create sliders
+  {
+    rcl_interfaces::msg::ParameterDescriptor desc;
+    rcl_interfaces::msg::IntegerRange range;
+    // gain 0..2
+    range.set__from_value(0);
+    range.set__to_value(2);
+    range.set__step(1);
+    desc.integer_range = {range};
+    declare_parameter<int>("gain", 0, desc);
+  }
+  {
+    rcl_interfaces::msg::ParameterDescriptor desc;
+    rcl_interfaces::msg::IntegerRange range;
+    range.set__from_value(650);
+    range.set__to_value(850);
+    range.set__step(1);
+    desc.integer_range = {range};
+    declare_parameter<int>("frequency", 740, desc);
+  }
+  {
+    rcl_interfaces::msg::ParameterDescriptor desc;
+    rcl_interfaces::msg::IntegerRange range;
+    range.set__from_value(1);
+    range.set__to_value(50);
+    range.set__step(1);
+    desc.integer_range = {range};
+    declare_parameter<int>("range_max", 2, desc);
+  }
+  {
+    rcl_interfaces::msg::ParameterDescriptor desc;
+    rcl_interfaces::msg::IntegerRange range;
+    range.set__from_value(60);
+    range.set__to_value(360);
+    range.set__step(1);
+    desc.integer_range = {range};
+    declare_parameter<int>("angle_sector", 360, desc);
+  }
+  {
+    rcl_interfaces::msg::ParameterDescriptor desc;
+    rcl_interfaces::msg::IntegerRange range;
+    range.set__from_value(1);
+    range.set__to_value(20);
+    range.set__step(1);
+    desc.integer_range = {range};
+    declare_parameter<int>("angle_step", 1, desc);
+  }
+  {
+    rcl_interfaces::msg::ParameterDescriptor desc;
+    rcl_interfaces::msg::IntegerRange range;
+    range.set__from_value(100);
+    range.set__to_value(1000);
+    range.set__step(2);
+    desc.integer_range = {range};
+    declare_parameter<int>("image_size", 300, desc);
+  }
+  {
+    rcl_interfaces::msg::ParameterDescriptor desc;
+    rcl_interfaces::msg::IntegerRange range;
+    range.set__from_value(1);
+    range.set__to_value(255);
+    range.set__step(1);
+    desc.integer_range = {range};
+    declare_parameter<int>("scan_threshold", 200, desc);
+  }
+  {
+    rcl_interfaces::msg::ParameterDescriptor desc;
+    rcl_interfaces::msg::IntegerRange range;
+    range.set__from_value(1450);
+    range.set__to_value(1550);
+    range.set__step(1);
+    desc.integer_range = {range};
+    declare_parameter<int>("speed_of_sound", 1500, desc);
+  }
+  {
+    rcl_interfaces::msg::ParameterDescriptor desc;
+    rcl_interfaces::msg::FloatingPointRange fr;
+    fr.set__from_value(50);
+    fr.set__to_value(2000);
+    fr.set__step(1);
+    desc.floating_point_range = {fr};
+    declare_parameter<int>("image_rate", 100, desc);
+  }
+  {
+    rcl_interfaces::msg::ParameterDescriptor desc;
+    rcl_interfaces::msg::IntegerRange range;
+    range.set__from_value(0);
+    range.set__to_value(20000);
+    range.set__step(1);
+    desc.integer_range = {range};
+    declare_parameter<int>("sonar_timeout", 8000, desc);
+  }
 
-  // constant initialization
-  const auto frame{declareParamDescription<string>("frame", "sonar", "Frame ID of the message headers")};
-  image.header.set__frame_id(frame);
-  image.set__encoding("mono8");
-  image.set__is_bigendian(0);
-  scan.header.set__frame_id(frame);
-  scan.set__range_min(0.75);
-  echo.header.set__frame_id(frame);
+  // boolean/unbounded params
+  declare_parameter<bool>("publish_image", true);
+  declare_parameter<bool>("publish_scan", true);
+  declare_parameter<bool>("publish_echo", true);
 
-  // ROS interface
-  configureFromParams();
-
-  const auto image_rate_ms{get_parameter("image_rate").as_int()};
-  image_timer = this->create_wall_timer(std::chrono::milliseconds(image_rate_ms),
-                                        [this](){publishImage();});
-
-  param_change = add_on_set_parameters_callback(
-                   std::bind(&Ping360Sonar::parametersCallback, this, std::placeholders::_1));
+  // frame string
+  declare_parameter<std::string>("frame", "sonar");
+  const auto frame{get_parameter("frame").as_string()};
+   image.header.set__frame_id(frame);
+   image.set__encoding("mono8");
+   image.set__is_bigendian(0);
+   scan.header.set__frame_id(frame);
+  //  scan.set__range_min(0.75); //old scan minimum
+   scan.set__range_min(0.5);
+   echo.header.set__frame_id(frame);
+ 
+   // ROS interface
+   configureFromParams();
+ 
+   const auto image_rate_ms{get_parameter("image_rate").as_int()};
+   image_timer = this->create_wall_timer(std::chrono::milliseconds(image_rate_ms),
+                                         [this](){publishImage();});
+ 
+   param_change = add_on_set_parameters_callback(
+                    std::bind(&Ping360Sonar::parametersCallback, this, std::placeholders::_1));
 }
 
 Ping360Sonar::IntParams Ping360Sonar::updatedParams(const std::vector<rclcpp::Parameter> &new_params) const
