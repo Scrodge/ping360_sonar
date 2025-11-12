@@ -26,6 +26,8 @@
   <depend>python3-bluerobotics-ping-pip</depend>
   <depend>tf2_ros</depend>
   <depend>geometry_msgs</depend>
+  <depend>tf2_sensor_msgs</depend>
+
 
   <export>
     <build_type>ament_cmake</build_type>

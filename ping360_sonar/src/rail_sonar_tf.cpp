@@ -24,6 +24,11 @@
 #include "tf2_ros/transform_broadcaster.h"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 
+// === Added for world-frame transform ===
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
+#include <tf2_sensor_msgs/tf2_sensor_msgs.hpp>
+
 using namespace std::chrono_literals;
 
 class RailSonarTF : public rclcpp::Node
@@ -34,13 +39,17 @@ public:
     running_(true),
     rail_pos_(0.5),
     sonar_z_(-2.0),
-    sonar_pitch_deg_(-30.0),
+    sonar_pitch_deg_(-45.0),
     pending_save_(false),
     pending_rail_pos_m_(0.0)
   {
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
-    serial_port_ = this->declare_parameter<std::string>("serial_port", "/dev/ttyACM0"); //change this
+    // === New TF listener setup ===
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
+    serial_port_ = this->declare_parameter<std::string>("serial_port", "/dev/ttyACM0");
     baudrate_ = this->declare_parameter<int>("baudrate", 115200);
 
     saved_scans_.reserve(16);
@@ -53,26 +62,15 @@ public:
 
     timer_ = this->create_wall_timer(100ms, std::bind(&RailSonarTF::broadcast_transforms, this));
 
-    // Subscribe to sonar_points topic (keep SensorDataQoS)
+    // Subscribe to sonar_points
     cloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       "sonar_points", rclcpp::SensorDataQoS(),
       std::bind(&RailSonarTF::cloudCallback, this, std::placeholders::_1));
 
-    // Add publishers for colored clouds
-    // cloud_pub_all_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
-    //   "sonar_points_all", rclcpp::SensorDataQoS());
-    // cloud_pub_latest_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
-    //   "sonar_points_latest", rclcpp::SensorDataQoS());
-
-    // Match ping360_node.cpp QoS
-    // --- match sonar_pointcloud_node QoS exactly: SensorDataQoS + RELIABLE ---
+    // Publishers (match QoS)
     auto cloud_qos = rclcpp::SensorDataQoS().reliable();
-
-    cloud_pub_all_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
-      "sonar_points_all", cloud_qos);
-
-    cloud_pub_latest_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
-      "sonar_points_latest", cloud_qos);
+    cloud_pub_all_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("sonar_points_all", cloud_qos);
+    cloud_pub_latest_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("sonar_points_latest", cloud_qos);
 
   }
 
@@ -113,6 +111,8 @@ private:
                                  static_cast<uint32_t>(B);
     const float rgb_as_float = *reinterpret_cast<const float*>(&packed_rgb);
 
+
+
     for (const auto& p : pts) {
       *it_x = p[0];
       *it_y = p[1];
@@ -123,7 +123,7 @@ private:
     return cloud;
   }
 
-  // === Transform broadcasting (unchanged) ===
+  // === Broadcast transforms (same logic) ===
   void broadcast_transforms()
   {
     rclcpp::Time now = this->get_clock()->now();
@@ -164,7 +164,7 @@ private:
     tf_broadcaster_->sendTransform(t2);
   }
 
-  // === Serial handling (unchanged) ===
+  // === Serial handling ===
   bool openSerial()
   {
     serial_fd_ = ::open(serial_port_.c_str(), O_RDONLY | O_NOCTTY | O_NONBLOCK);
@@ -217,6 +217,24 @@ private:
     }
   }
 
+  // void parseAndApplyLine(const std::string &line)
+  // {
+  //   std::istringstream ss(line);
+  //   double v;
+  //   if (ss >> v)
+  //   {
+  //     {
+  //       std::lock_guard<std::mutex> lk(data_mtx_);
+  //       rail_pos_ = v;
+  //     }
+  //     {
+  //       std::lock_guard<std::mutex> lk(save_mtx_);
+  //       pending_rail_pos_m_ = v;
+  //       pending_save_.store(true);
+  //     }
+  //     RCLCPP_INFO(this->get_logger(), "Serial rail_pos updated: %.3f", v);
+  //   }
+  // }
   void parseAndApplyLine(const std::string &line)
   {
     std::istringstream ss(line);
@@ -232,69 +250,156 @@ private:
         pending_rail_pos_m_ = v;
         pending_save_.store(true);
       }
-      RCLCPP_INFO(this->get_logger(), "Serial rail_pos updated: %.3f", v);
+      rail_state_.store(RailState::WAITING_FOR_FIRST_SCAN);
+      RCLCPP_INFO(this->get_logger(), "Rail moved to %.3f m. Waiting for stationary scan.", v);
     }
   }
 
-  // === PointCloud Handling ===
+
+  // === PointCloud Handling (world-aligned fix) ===
+  // void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud)
+  // {
+  //   if (!pending_save_.load()) return;
+
+  //   bool should_save = false;
+  //   {
+  //     std::lock_guard<std::mutex> lk(save_mtx_);
+  //     if (pending_save_.load()) { pending_save_.store(false); should_save = true; }
+  //   }
+  //   if (!should_save) return;
+
+  //   // Transform cloud into world frame once
+  //   sensor_msgs::msg::PointCloud2 cloud_world;
+  //   try {
+  //     geometry_msgs::msg::TransformStamped transform =
+  //       tf_buffer_->lookupTransform("world", cloud->header.frame_id, rclcpp::Time(0), 100ms);
+  //     tf2::doTransform(*cloud, cloud_world, transform);
+  //   } catch (tf2::TransformException &ex) {
+  //     RCLCPP_WARN(this->get_logger(), "TF transform failed: %s", ex.what());
+  //     return;
+  //   }
+
+  //   // Extract points from world-aligned cloud
+  //   const size_t N = cloud_world.width * cloud_world.height;
+  //   std::vector<std::array<float,3>> pts;
+  //   pts.reserve(N);
+  //   sensor_msgs::PointCloud2Iterator<float> it_x(cloud_world, "x");
+  //   sensor_msgs::PointCloud2Iterator<float> it_y(cloud_world, "y");
+  //   sensor_msgs::PointCloud2Iterator<float> it_z(cloud_world, "z");
+  //   for (size_t i = 0; i < N; ++i, ++it_x, ++it_y, ++it_z) {
+  //     float x = *it_x, y = *it_y, z = *it_z;
+  //     if (std::isfinite(x) && std::isfinite(y) && std::isfinite(z))
+  //       pts.push_back({x, y, z});
+  //   }
+
+  //   cloud_world.header.frame_id = "world";
+
+  //   // Save and publish
+  //   if (saved_scans_.size() >= max_saved_scans_) {
+  //     saved_scans_.erase(saved_scans_.begin());
+  //     saved_rail_positions_m_.erase(saved_rail_positions_m_.begin());
+  //   }
+  //   saved_scans_.push_back(std::move(pts));
+  //   saved_rail_positions_m_.push_back(pending_rail_pos_m_);
+
+  //   // Publish latest (red)
+  //   cloud_pub_latest_->publish(cloud_world);
+
+  //   // Merge all (white)
+  //   std::vector<std::array<float,3>> all_pts;
+  //   for (const auto& v : saved_scans_) all_pts.insert(all_pts.end(), v.begin(), v.end());
+  //   auto all_cloud = makeColoredCloud(all_pts, "world", cloud->header.stamp, 255, 255, 255);
+  //   cloud_pub_all_->publish(all_cloud);
+
+  //   RCLCPP_INFO(this->get_logger(), "Stored world-aligned scan, total=%zu", saved_scans_.size());
+  // }
   void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud)
   {
-    if (!pending_save_.load()) return;
+    // Ignore empty point clouds
+    if (cloud->width * cloud->height == 0)
+      return;
 
-    bool should_save = false;
-    {
-      std::lock_guard<std::mutex> lk(save_mtx_);
-      if (pending_save_.load()) { pending_save_.store(false); should_save = true; }
+    RailState state = rail_state_.load();
+
+    if (state == RailState::WAITING_FOR_FIRST_SCAN) {
+      // Skip the first scan after each movement
+      rail_state_.store(RailState::READY_TO_SAVE);
+      RCLCPP_INFO(this->get_logger(), "Ignored first scan after rail move, next scan will be saved.");
+      return;
     }
-    if (!should_save) return;
 
-    double rail_pos_m = 0.0;
-    { std::lock_guard<std::mutex> lk(save_mtx_); rail_pos_m = pending_rail_pos_m_; }
+    if (state != RailState::READY_TO_SAVE)
+      return; // Do nothing until we're stationary and ready
 
-    // Extract points
-    const size_t N = cloud->width * cloud->height;
+    // Proceed to save stationary scan
+    rail_state_.store(RailState::MOVING); // lock until next movement
+    RCLCPP_INFO(this->get_logger(), "Saving stationary sonar scan.");
+
+    // --- Lookup TF with small time offset (prevents future extrapolation) ---
+    geometry_msgs::msg::TransformStamped transform;
+    try {
+      // Convert builtin_interfaces::msg::Time → rclcpp::Time first
+      rclcpp::Time cloud_time(cloud->header.stamp);
+      rclcpp::Time lookup_time = cloud_time - rclcpp::Duration::from_seconds(0.1);  // 100 ms offset
+
+      transform = tf_buffer_->lookupTransform(
+        "world", cloud->header.frame_id, lookup_time, 500ms);
+    } catch (tf2::TransformException &ex) {
+      RCLCPP_WARN(this->get_logger(), "TF lookup failed: %s", ex.what());
+      return;
+    }
+
+    // --- Transform the cloud to world frame ---
+    sensor_msgs::msg::PointCloud2 cloud_world;
+    tf2::doTransform(*cloud, cloud_world, transform);
+
+    // --- Extract valid XYZ points ---
+    const size_t N = cloud_world.width * cloud_world.height;
     std::vector<std::array<float,3>> pts;
     pts.reserve(N);
-    sensor_msgs::PointCloud2Iterator<float> it_x(*cloud, "x");
-    sensor_msgs::PointCloud2Iterator<float> it_y(*cloud, "y");
-    sensor_msgs::PointCloud2Iterator<float> it_z(*cloud, "z");
+    sensor_msgs::PointCloud2Iterator<float> it_x(cloud_world, "x");
+    sensor_msgs::PointCloud2Iterator<float> it_y(cloud_world, "y");
+    sensor_msgs::PointCloud2Iterator<float> it_z(cloud_world, "z");
+
     for (size_t i = 0; i < N; ++i, ++it_x, ++it_y, ++it_z) {
       float x = *it_x, y = *it_y, z = *it_z;
       if (std::isfinite(x) && std::isfinite(y) && std::isfinite(z))
         pts.push_back({x, y, z});
     }
 
+    // --- Save scan data ---
     if (saved_scans_.size() >= max_saved_scans_) {
       saved_scans_.erase(saved_scans_.begin());
       saved_rail_positions_m_.erase(saved_rail_positions_m_.begin());
     }
 
     saved_scans_.push_back(std::move(pts));
-    saved_rail_positions_m_.push_back(rail_pos_m);
+    saved_rail_positions_m_.push_back(pending_rail_pos_m_);
 
-    RCLCPP_INFO(this->get_logger(), "Saved scan #%zu, points=%zu, pos=%.3f m",
-                saved_scans_.size()-1, saved_scans_.back().size(), rail_pos_m);
+    RCLCPP_INFO(this->get_logger(), "Stored scan #%zu at %.3f m (points=%zu)",
+                saved_scans_.size()-1, pending_rail_pos_m_, saved_scans_.back().size());
 
-    // ---- Publish latest (red) ----
+    // --- Publish colored point clouds ---
     const auto& latest_pts = saved_scans_.back();
-    auto latest_cloud = makeColoredCloud(latest_pts, cloud->header.frame_id,
-                                         cloud->header.stamp, 255, 0, 0);
+    auto latest_cloud = makeColoredCloud(latest_pts, "world", cloud_world.header.stamp, 255, 0, 0);
     cloud_pub_latest_->publish(latest_cloud);
 
-    // ---- Publish all (white) ----
     std::vector<std::array<float,3>> all_pts;
-    size_t total = 0;
-    for (const auto& v : saved_scans_) total += v.size();
-    all_pts.reserve(total);
-    for (const auto& v : saved_scans_) all_pts.insert(all_pts.end(), v.begin(), v.end());
-    auto all_cloud = makeColoredCloud(all_pts, cloud->header.frame_id,
-                                      cloud->header.stamp, 255, 255, 255);
+    for (const auto& v : saved_scans_)
+      all_pts.insert(all_pts.end(), v.begin(), v.end());
+    auto all_cloud = makeColoredCloud(all_pts, "world", cloud_world.header.stamp, 255, 255, 255);
     cloud_pub_all_->publish(all_cloud);
   }
 
+
+
+  enum class RailState { MOVING, WAITING_FOR_FIRST_SCAN, READY_TO_SAVE };
+  std::atomic<RailState> rail_state_{RailState::MOVING};
   // === Variables ===
   rclcpp::TimerBase::SharedPtr timer_;
   std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
   std::string serial_port_;
   int baudrate_;
   int serial_fd_ = -1;

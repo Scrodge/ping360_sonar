@@ -2,6 +2,7 @@
 #include <ping360_sonar/sector.h>
 #include <ping-message-common.h>
 #include <ping-message-ping360.h>
+#include <cmath>  // >>> ADDED FOR SONAR PITCH <<<
 
 using namespace std::chrono_literals;
 using namespace ping360_sonar;
@@ -15,7 +16,6 @@ Ping360Sonar::Ping360Sonar(rclcpp::NodeOptions options)
   {
     rcl_interfaces::msg::ParameterDescriptor desc;
     rcl_interfaces::msg::IntegerRange range;
-    // gain 0..2
     range.set__from_value(0);
     range.set__to_value(2);
     range.set__step(1);
@@ -109,36 +109,42 @@ Ping360Sonar::Ping360Sonar(rclcpp::NodeOptions options)
   declare_parameter<bool>("publish_scan", true);
   declare_parameter<bool>("publish_echo", true);
 
+  // >>> ADDED FOR SONAR PITCH PARAMETER <<<
+  {
+    rcl_interfaces::msg::ParameterDescriptor desc;
+    desc.description = "Sonar tilt (pitch) in degrees. Positive = tilt downward.";
+    declare_parameter<int>("sonar_pitch_deg", 0, desc);
+  }
+  // >>> END ADDED <<<
+
   // frame string
   declare_parameter<std::string>("frame", "sonar");
   const auto frame{get_parameter("frame").as_string()};
-   image.header.set__frame_id(frame);
-   image.set__encoding("mono8");
-   image.set__is_bigendian(0);
-   scan.header.set__frame_id(frame);
-  //  scan.set__range_min(0.75); //old scan minimum
-   scan.set__range_min(0.5);
-   echo.header.set__frame_id(frame);
+  image.header.set__frame_id(frame);
+  image.set__encoding("mono8");
+  image.set__is_bigendian(0);
+  scan.header.set__frame_id(frame);
+  scan.set__range_min(0.5);
+  echo.header.set__frame_id(frame);
  
-   // ROS interface
-   configureFromParams();
+  // ROS interface
+  configureFromParams();
  
-   const auto image_rate_ms{get_parameter("image_rate").as_int()};
-   image_timer = this->create_wall_timer(std::chrono::milliseconds(image_rate_ms),
+  const auto image_rate_ms{get_parameter("image_rate").as_int()};
+  image_timer = this->create_wall_timer(std::chrono::milliseconds(image_rate_ms),
                                          [this](){publishImage();});
  
-   param_change = add_on_set_parameters_callback(
+  param_change = add_on_set_parameters_callback(
                     std::bind(&Ping360Sonar::parametersCallback, this, std::placeholders::_1));
 }
 
 Ping360Sonar::IntParams Ping360Sonar::updatedParams(const std::vector<rclcpp::Parameter> &new_params) const
 {
-  // "only" parameters to be monitored for change
   using ParamType = rclcpp::ParameterType;
   const std::map<ParamType,vector<string>> mutable_params{
     {ParamType::PARAMETER_INTEGER,{"gain","frequency","range_max",
                                    "angle_sector","angle_step",
-                                   "speed_of_sound","image_size", "scan_threshold", "sonar_timeout"}},
+                                   "speed_of_sound","image_size","scan_threshold","sonar_timeout"}},
     {ParamType::PARAMETER_BOOL, {"publish_image","publish_scan","publish_echo"}}};
 
   IntParams mapping;
@@ -156,7 +162,6 @@ Ping360Sonar::IntParams Ping360Sonar::updatedParams(const std::vector<rclcpp::Pa
         mapping[param.get_name()] = param.as_bool();
     }
   }
-  // override with new ones
   for(auto &param: new_params)
   {
     if(param.get_type() == ParamType::PARAMETER_BOOL)
@@ -198,14 +203,12 @@ void Ping360Sonar::initPublishers(bool image, bool scan, bool echo)
 
 void Ping360Sonar::configureFromParams(const vector<rclcpp::Parameter> &new_params)
 {
-  // get current params updated with new ones, if any
   const auto params{updatedParams(new_params)};
 
-  // forward to configuration
   const auto [angle_sector, step] = sonar.configureAngles(params.at("angle_sector"),
       params.at("angle_step"),
       params.at("publish_scan")); {}
-  // inform if requested angle config cannot be met because of gradians
+
   if(angle_sector != params.at("angle_sector") || step != params.at("angle_step"))
   {
     RCLCPP_INFO(get_logger(),
@@ -223,7 +226,6 @@ void Ping360Sonar::configureFromParams(const vector<rclcpp::Parameter> &new_para
                             params.at("range_max"));
   sonar.setTimeout(params.at("sonar_timeout"));
 
-  // forward to message meta-data
   echo.set__gain(params.at("gain"));
   echo.set__range(params.at("range_max"));
   echo.set__speed_of_sound(params.at("speed_of_sound"));
@@ -263,7 +265,6 @@ void Ping360Sonar::publishEcho(const rclcpp::Time &now)
 
 void Ping360Sonar::publishScan(const rclcpp::Time &now, bool end_turn)
 {
-  // write latest reading
   scan.ranges.resize(sonar.angleCount());
   scan.intensities.resize(sonar.angleCount());
 
@@ -271,7 +272,6 @@ void Ping360Sonar::publishScan(const rclcpp::Time &now, bool end_turn)
   auto &this_range = scan.ranges[angle] = 0;
   auto &this_intensity = scan.intensities[angle] = 0;
 
-  // find first (nearest) valid point in this direction
   const auto [data, length] = sonar.intensities(); {}
   for(int index=0; index<length; index++)
   {
@@ -287,19 +287,28 @@ void Ping360Sonar::publishScan(const rclcpp::Time &now, bool end_turn)
     }
   }
 
+  // >>> ADDED FOR SONAR PITCH <<<
+  // int pitch_deg_int = get_parameter("sonar_pitch_deg").as_int();
+  // double pitch_deg = static_cast<double>(pitch_deg_int);
+  // double pitch_rad = pitch_deg * M_PI / 180.0;
+
+  // // double pitch_deg = get_parameter("sonar_pitch_deg").as_double();
+  // // double pitch_rad = pitch_deg * M_PI / 180.0;
+  // RCLCPP_DEBUG(get_logger(), "Sonar tilt applied: %.2f deg (%.3f rad)", pitch_deg, pitch_rad);
+  // scan.header.frame_id = "sonar_tilted";  // optional: mark tilted frame
+  // >>> END ADDED <<<
+
   if(end_turn)
   {
     if(!sonar.fullScan())
     {
       if(sonar.angleStep() < 0)
       {
-        // now going negative: scan was positive
         scan.set__angle_max(sonar.angleMax());
         scan.set__angle_min(sonar.angleMin());
       }
       else
       {
-        // now going positive: scan was negative
         scan.set__angle_max(sonar.angleMin());
         scan.set__angle_min(sonar.angleMax());
       }
