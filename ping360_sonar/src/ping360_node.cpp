@@ -103,6 +103,17 @@ Ping360Sonar::Ping360Sonar(rclcpp::NodeOptions options)
     desc.integer_range = {range};
     declare_parameter<int>("sonar_timeout", 8000, desc);
   }
+  {
+    rcl_interfaces::msg::ParameterDescriptor desc;
+    rcl_interfaces::msg::IntegerRange range;
+    range.set__from_value(5);       // PingViewer allows 5–128 µs
+    range.set__to_value(128);
+    range.set__step(1);
+    desc.integer_range = {range};
+    desc.description = "Transmit pulse duration in microseconds";
+    declare_parameter<int>("transmit_duration", 40, desc);  // default: 40 µs
+  }
+
 
   // boolean/unbounded params
   declare_parameter<bool>("publish_image", true);
@@ -124,7 +135,7 @@ Ping360Sonar::Ping360Sonar(rclcpp::NodeOptions options)
   image.set__encoding("mono8");
   image.set__is_bigendian(0);
   scan.header.set__frame_id(frame);
-  scan.set__range_min(0.5);
+  scan.set__range_min(1.20);
   echo.header.set__frame_id(frame);
  
   // ROS interface
@@ -144,7 +155,7 @@ Ping360Sonar::IntParams Ping360Sonar::updatedParams(const std::vector<rclcpp::Pa
   const std::map<ParamType,vector<string>> mutable_params{
     {ParamType::PARAMETER_INTEGER,{"gain","frequency","range_max",
                                    "angle_sector","angle_step",
-                                   "speed_of_sound","image_size","scan_threshold","sonar_timeout"}},
+                                   "speed_of_sound","image_size","scan_threshold","sonar_timeout","transmit_duration"}},
     {ParamType::PARAMETER_BOOL, {"publish_image","publish_scan","publish_echo"}}};
 
   IntParams mapping;
@@ -201,37 +212,103 @@ void Ping360Sonar::initPublishers(bool image, bool scan, bool echo)
     scan_pub = create_publisher<sensor_msgs::msg::LaserScan>("scan", qos);
 }
 
-void Ping360Sonar::configureFromParams(const vector<rclcpp::Parameter> &new_params)
+// void Ping360Sonar::configureFromParams(const vector<rclcpp::Parameter> &new_params)
+// {
+//   const auto params{updatedParams(new_params)};
+
+//   const auto [angle_sector, step] = sonar.configureAngles(params.at("angle_sector"),
+//       params.at("angle_step"),
+//       params.at("publish_scan")); {}
+
+//   if(angle_sector != params.at("angle_sector") || step != params.at("angle_step"))
+//   {
+//     RCLCPP_INFO(get_logger(),
+//                 "Due to sonar using gradians, sector is %i (requested %i) and step is %i (requested %i)",
+//                 angle_sector, params.at("angle_sector"), step, params.at("angle_step"));
+//   }
+
+//   initPublishers(params.at("publish_image"),
+//                  params.at("publish_scan"),
+//                  params.at("publish_echo"));
+
+//   sonar.configureTransducer(params.at("gain"),
+//                             params.at("frequency"),
+//                             params.at("speed_of_sound"),
+//                             params.at("range_max"));
+                            
+//   sonar.setTimeout(params.at("sonar_timeout"));
+
+//   echo.set__gain(params.at("gain"));
+//   echo.set__range(params.at("range_max"));
+//   echo.set__speed_of_sound(params.at("speed_of_sound"));
+//   echo.set__number_of_samples(sonar.samples());
+//   echo.set__transmit_frequency(params.at("frequency"));
+
+//   scan.set__range_max(params.at("range_max"));
+//   scan.set__time_increment(sonar.transmitDuration());
+//   scan.set__angle_max(sonar.angleMax());
+//   scan.set__angle_min(sonar.angleMin());
+//   scan.set__angle_increment(sonar.angleStep());
+
+//   const int size{params.at("image_size")};
+//   if(size != static_cast<int>(image.step) ||
+//      std::any_of(new_params.begin(), new_params.end(),
+//                  [](const auto &param){return param.get_name() == "angle_sector";}))
+//   {
+//     image.data.resize(size*size);
+//     std::fill(image.data.begin(), image.data.end(), 0);
+//     image.height = image.width = image.step = size;
+//   }
+
+//   sector.configure(sonar.samples(), size/2);
+//   scan_threshold = params.at("scan_threshold");
+// }
+void Ping360Sonar::configureFromParams(const std::vector<rclcpp::Parameter> &new_params)
 {
   const auto params{updatedParams(new_params)};
 
-  const auto [angle_sector, step] = sonar.configureAngles(params.at("angle_sector"),
+  const auto [angle_sector, step] = sonar.configureAngles(
+      params.at("angle_sector"),
       params.at("angle_step"),
-      params.at("publish_scan")); {}
+      params.at("publish_scan"));
 
-  if(angle_sector != params.at("angle_sector") || step != params.at("angle_step"))
+  if (angle_sector != params.at("angle_sector") || step != params.at("angle_step"))
   {
-    RCLCPP_INFO(get_logger(),
-                "Due to sonar using gradians, sector is %i (requested %i) and step is %i (requested %i)",
-                angle_sector, params.at("angle_sector"), step, params.at("angle_step"));
+    RCLCPP_INFO(
+      get_logger(),
+      "Due to sonar using gradians, sector is %i (requested %i) and step is %i (requested %i)",
+      angle_sector, params.at("angle_sector"), step, params.at("angle_step"));
   }
 
   initPublishers(params.at("publish_image"),
                  params.at("publish_scan"),
                  params.at("publish_echo"));
 
-  sonar.configureTransducer(params.at("gain"),
-                            params.at("frequency"),
-                            params.at("speed_of_sound"),
-                            params.at("range_max"));
+  // --- Clamp transmit duration (µs) into safe range [5, 128] ---
+  int tx = params.at("transmit_duration");
+  if (tx < 5)   tx = 5;
+  if (tx > 128) tx = 128;
+
+  // --- Configure transducer, now with transmit duration ---
+  sonar.configureTransducer(
+      params.at("gain"),
+      params.at("frequency"),
+      params.at("speed_of_sound"),
+      params.at("range_max"),
+      tx);
+
   sonar.setTimeout(params.at("sonar_timeout"));
 
+  // Fill echo metadata
   echo.set__gain(params.at("gain"));
   echo.set__range(params.at("range_max"));
   echo.set__speed_of_sound(params.at("speed_of_sound"));
   echo.set__number_of_samples(sonar.samples());
   echo.set__transmit_frequency(params.at("frequency"));
+  // If your SonarEcho message has a tx duration field, you could also add:
+  // echo.set__transmit_duration(tx);
 
+  // LaserScan setup
   scan.set__range_max(params.at("range_max"));
   scan.set__time_increment(sonar.transmitDuration());
   scan.set__angle_max(sonar.angleMax());
@@ -239,18 +316,19 @@ void Ping360Sonar::configureFromParams(const vector<rclcpp::Parameter> &new_para
   scan.set__angle_increment(sonar.angleStep());
 
   const int size{params.at("image_size")};
-  if(size != static_cast<int>(image.step) ||
-     std::any_of(new_params.begin(), new_params.end(),
-                 [](const auto &param){return param.get_name() == "angle_sector";}))
+  if (size != static_cast<int>(image.step) ||
+      std::any_of(new_params.begin(), new_params.end(),
+                  [](const auto &param){return param.get_name() == "angle_sector";}))
   {
-    image.data.resize(size*size);
+    image.data.resize(size * size);
     std::fill(image.data.begin(), image.data.end(), 0);
     image.height = image.width = image.step = size;
   }
 
-  sector.configure(sonar.samples(), size/2);
+  sector.configure(sonar.samples(), size / 2);
   scan_threshold = params.at("scan_threshold");
 }
+
 
 
 void Ping360Sonar::publishEcho(const rclcpp::Time &now)

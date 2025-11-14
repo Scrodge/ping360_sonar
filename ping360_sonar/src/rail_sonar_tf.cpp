@@ -38,8 +38,8 @@ public:
   : Node("rail_sonar_tf"),
     running_(true),
     rail_pos_(0.5),
-    sonar_z_(-2.0),
-    sonar_pitch_deg_(-45.0),
+    sonar_z_(-0.6),
+    sonar_pitch_deg_(-90.0),
     pending_save_(false),
     pending_rail_pos_m_(0.0)
   {

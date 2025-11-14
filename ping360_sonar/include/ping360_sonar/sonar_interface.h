@@ -12,7 +12,9 @@ namespace ping360_sonar
 class Ping360Interface
 {
 public:
-  Ping360Interface(std::string device, int baudrate, bool fallback, std::string connection_type, std::string udp_address, int udp_port);
+  Ping360Interface(std::string device, int baudrate, bool fallback,
+                   std::string connection_type, std::string udp_address, int udp_port);
+
   ~Ping360Interface()
   {
     if(!real_sonar)
@@ -20,10 +22,17 @@ public:
     sonar->set_motor_off();
     sonar->waitMessage(CommonId::ACK, 1000);
   }
+
   std::pair<bool, bool> read();
 
   std::pair<int, int> configureAngles(int aperture_deg, int step_deg, bool align_step);
-  void configureTransducer(uint8_t gain, uint16_t frequency, uint16_t speed_of_sound, float range);
+
+  // --- UPDATED: support manual transmit duration ---
+  void configureTransducer(uint8_t gain,
+                           uint16_t frequency,
+                           uint16_t speed_of_sound,
+                           float range,
+                           uint16_t transmit_duration_us = 0);  // ← NEW PARAM
 
   inline float rangeFrom(int index) const
   {
@@ -56,8 +65,8 @@ public:
   }
   inline double transmitDuration() const
   {
-    // micro to seconds
-    return sonar->device_data_data.transmit_duration/1e6;
+    // microseconds → seconds
+    return sonar->device_data_data.transmit_duration / 1e6;
   }
 
 private:
@@ -73,6 +82,9 @@ private:
   int angle{};
   int timeout{8000};
 
+  // --- NEW: user-defined transmit duration handling ---
+  bool use_user_transmit_duration_{false};
+  uint16_t user_transmit_duration_us_{0};
 
   static inline float grad2rad(int grad)
   {
@@ -80,8 +92,6 @@ private:
   }
 };
 
-
 }
-
 
 #endif

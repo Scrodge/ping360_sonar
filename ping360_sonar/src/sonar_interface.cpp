@@ -1,5 +1,7 @@
 #include <ping360_sonar/sonar_interface.h>
 #include <thread>
+#include <algorithm>
+#include <cmath> 
 
 
 constexpr static int firmwareMaxSamples{1200};
@@ -91,55 +93,123 @@ std::pair<int, int> Ping360Interface::configureAngles(int aperture_deg, int step
   return {round(best_half_aperture*360./200), round(angle_step*360./400)};
 }
 
-void Ping360Interface::configureTransducer(uint8_t gain, uint16_t frequency, uint16_t speed_of_sound, float range)
+// void Ping360Interface::configureTransducer(uint8_t gain, uint16_t frequency, uint16_t speed_of_sound, float range)
+// {
+//   max_range = range;
+//   auto &device{sonar->device_data_data};
+//   device.mode = 1;
+//   device.gain_setting = gain;
+//   device.transmit_frequency = frequency;
+
+//   // find maximum possible samples for this range
+//   device.number_of_samples = std::min<uint16_t>(firmwareMaxSamples,
+//                                                 2.f*range/(firmwareMinSamplePeriod * speed_of_sound * samplePeriodTickDuration));
+//   device.sample_period = 2.f*range / (device.number_of_samples * speed_of_sound * samplePeriodTickDuration);
+
+//   // transmit duration depends on max range + hardware limits
+//   /*
+//    * Per firmware engineer:
+//    * 1. Starting point is TxPulse in usec = ((one-way range in metres) * 8000) / (Velocity of sound in metres
+//    * per second)
+//    * 2. Then check that TxPulse is wide enough for currently selected sample interval in usec, i.e.,
+//    *    if TxPulse < (2.5 * sample interval) then TxPulse = (2.5 * sample interval)
+//    * 3. Perform limit checking
+//   */
+//   // 1
+//   const auto one_way_duration_us{std::round((8000.f*range)/speed_of_sound)};
+//   // 2 (transmit duration is microseconds, sample_period_ns is nanoseconds)
+//   const auto sample_period_ns{device.sample_period * samplePeriodTickDuration};
+//   device.transmit_duration = std::max<ushort>(2.5f*sample_period_ns/1000, one_way_duration_us);
+//   // 3 ensure bounds
+//   if(device.transmit_duration < firmwareMinTransmitDuration)
+//     device.transmit_duration = firmwareMinTransmitDuration;
+//   else
+//   {
+//     const auto max_duration{std::min<ushort>(firmwareMaxTransmitDuration, sample_period_ns*maxDurationRatio)};
+//     if(device.transmit_duration > max_duration)
+//       device.transmit_duration = max_duration;
+//   }
+
+//   if(!real_sonar)
+//   {
+//     const auto samples{device.number_of_samples};
+//     if(device.data != nullptr && device.data_length != samples)
+//       delete[] device.data;
+
+//     device.data_length = samples;
+
+//     if(device.data == nullptr)
+//       device.data = new uint8_t[samples];
+//   }
+// }
+void Ping360Interface::configureTransducer(uint8_t gain,
+                                           uint16_t frequency,
+                                           uint16_t speed_of_sound,
+                                           float range,
+                                           uint16_t transmit_duration_us)
 {
   max_range = range;
-  auto &device{sonar->device_data_data};
+  auto &device = sonar->device_data_data;
+
   device.mode = 1;
   device.gain_setting = gain;
   device.transmit_frequency = frequency;
 
-  // find maximum possible samples for this range
-  device.number_of_samples = std::min<uint16_t>(firmwareMaxSamples,
-                                                2.f*range/(firmwareMinSamplePeriod * speed_of_sound * samplePeriodTickDuration));
-  device.sample_period = 2.f*range / (device.number_of_samples * speed_of_sound * samplePeriodTickDuration);
+  // number of samples based on sonar constraints
+  device.number_of_samples = std::min<uint16_t>(
+      firmwareMaxSamples,
+      2.f * range / (firmwareMinSamplePeriod * speed_of_sound * samplePeriodTickDuration));
 
-  // transmit duration depends on max range + hardware limits
-  /*
-   * Per firmware engineer:
-   * 1. Starting point is TxPulse in usec = ((one-way range in metres) * 8000) / (Velocity of sound in metres
-   * per second)
-   * 2. Then check that TxPulse is wide enough for currently selected sample interval in usec, i.e.,
-   *    if TxPulse < (2.5 * sample interval) then TxPulse = (2.5 * sample interval)
-   * 3. Perform limit checking
-  */
-  // 1
-  const auto one_way_duration_us{std::round((8000.f*range)/speed_of_sound)};
-  // 2 (transmit duration is microseconds, sample_period_ns is nanoseconds)
-  const auto sample_period_ns{device.sample_period * samplePeriodTickDuration};
-  device.transmit_duration = std::max<ushort>(2.5f*sample_period_ns/1000, one_way_duration_us);
-  // 3 ensure bounds
-  if(device.transmit_duration < firmwareMinTransmitDuration)
-    device.transmit_duration = firmwareMinTransmitDuration;
+  device.sample_period = 2.f * range /
+      (device.number_of_samples * speed_of_sound * samplePeriodTickDuration);
+
+  // --- User-specified transmit duration override ---
+  if (transmit_duration_us > 0)
+  {
+      use_user_transmit_duration_ = true;
+      user_transmit_duration_us_ =
+          std::max<uint16_t>(5, std::min<uint16_t>(transmit_duration_us, 128));
+  }
   else
   {
-    const auto max_duration{std::min<ushort>(firmwareMaxTransmitDuration, sample_period_ns*maxDurationRatio)};
-    if(device.transmit_duration > max_duration)
-      device.transmit_duration = max_duration;
+      use_user_transmit_duration_ = false;
   }
 
-  if(!real_sonar)
+  // --- AUTO TX duration calculation ---
+  const auto one_way_duration_us = std::round((8000.f * range) / speed_of_sound);
+  const auto sample_period_ns = device.sample_period * samplePeriodTickDuration;
+
+  uint16_t auto_tx = std::max<uint16_t>(
+      2.5f * sample_period_ns / 1000,
+      one_way_duration_us);
+
+  if (auto_tx < firmwareMinTransmitDuration)
+      auto_tx = firmwareMinTransmitDuration;
+
+  uint16_t max_tx =
+      std::min<uint16_t>(firmwareMaxTransmitDuration, sample_period_ns * maxDurationRatio);
+
+  if (auto_tx > max_tx)
+      auto_tx = max_tx;
+
+  // Apply override or auto
+  device.transmit_duration =
+      use_user_transmit_duration_ ? user_transmit_duration_us_ : auto_tx;
+
+  // allocate simulated buffer if in emulation mode
+  if (!real_sonar)
   {
-    const auto samples{device.number_of_samples};
-    if(device.data != nullptr && device.data_length != samples)
-      delete[] device.data;
+      const auto samples = device.number_of_samples;
+      if (device.data != nullptr && device.data_length != samples)
+          delete[] device.data;
 
-    device.data_length = samples;
+      device.data_length = samples;
 
-    if(device.data == nullptr)
-      device.data = new uint8_t[samples];
+      if (device.data == nullptr)
+          device.data = new uint8_t[samples];
   }
 }
+
 
 bool Ping360Interface::updateAngle()
 {
