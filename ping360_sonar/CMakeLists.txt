@@ -35,7 +35,7 @@ endif()
 target_include_directories(ping360_node PRIVATE include src/ping-cpp/src)
 target_link_libraries(ping360_node ping-cpp)
 ament_target_dependencies(ping360_node rclcpp sensor_msgs ping360_sonar_msgs image_transport)
-ament_target_dependencies(sonar_pointcloud_node rclcpp sensor_msgs)
+ament_target_dependencies(sonar_pointcloud_node rclcpp sensor_msgs ping360_sonar_msgs)
 ament_target_dependencies(rail_sonar_tf rclcpp tf2_ros geometry_msgs sensor_msgs tf2_sensor_msgs)
 
 # Install

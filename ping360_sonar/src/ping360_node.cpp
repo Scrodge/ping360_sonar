@@ -20,7 +20,7 @@ Ping360Sonar::Ping360Sonar(rclcpp::NodeOptions options)
     range.set__to_value(2);
     range.set__step(1);
     desc.integer_range = {range};
-    declare_parameter<int>("gain", 0, desc);
+    declare_parameter<int>("gain", 1, desc);
   }
   {
     rcl_interfaces::msg::ParameterDescriptor desc;
@@ -29,7 +29,7 @@ Ping360Sonar::Ping360Sonar(rclcpp::NodeOptions options)
     range.set__to_value(850);
     range.set__step(1);
     desc.integer_range = {range};
-    declare_parameter<int>("frequency", 740, desc);
+    declare_parameter<int>("frequency", 650, desc);
   }
   {
     rcl_interfaces::msg::ParameterDescriptor desc;
@@ -38,7 +38,7 @@ Ping360Sonar::Ping360Sonar(rclcpp::NodeOptions options)
     range.set__to_value(50);
     range.set__step(1);
     desc.integer_range = {range};
-    declare_parameter<int>("range_max", 2, desc);
+    declare_parameter<int>("range_max", 3, desc);
   }
   {
     rcl_interfaces::msg::ParameterDescriptor desc;
@@ -47,7 +47,7 @@ Ping360Sonar::Ping360Sonar(rclcpp::NodeOptions options)
     range.set__to_value(360);
     range.set__step(1);
     desc.integer_range = {range};
-    declare_parameter<int>("angle_sector", 360, desc);
+    declare_parameter<int>("angle_sector", 180, desc);
   }
   {
     rcl_interfaces::msg::ParameterDescriptor desc;
@@ -65,7 +65,7 @@ Ping360Sonar::Ping360Sonar(rclcpp::NodeOptions options)
     range.set__to_value(1000);
     range.set__step(2);
     desc.integer_range = {range};
-    declare_parameter<int>("image_size", 300, desc);
+    declare_parameter<int>("image_size", 1000, desc);
   }
   {
     rcl_interfaces::msg::ParameterDescriptor desc;
@@ -74,7 +74,7 @@ Ping360Sonar::Ping360Sonar(rclcpp::NodeOptions options)
     range.set__to_value(255);
     range.set__step(1);
     desc.integer_range = {range};
-    declare_parameter<int>("scan_threshold", 200, desc);
+    declare_parameter<int>("scan_threshold", 140, desc);
   }
   {
     rcl_interfaces::msg::ParameterDescriptor desc;
@@ -111,7 +111,7 @@ Ping360Sonar::Ping360Sonar(rclcpp::NodeOptions options)
     range.set__step(1);
     desc.integer_range = {range};
     desc.description = "Transmit pulse duration in microseconds";
-    declare_parameter<int>("transmit_duration", 40, desc);  // default: 40 µs
+    declare_parameter<int>("transmit_duration", 128, desc);  // default: 40 µs
   }
 
 
@@ -124,7 +124,7 @@ Ping360Sonar::Ping360Sonar(rclcpp::NodeOptions options)
   {
     rcl_interfaces::msg::ParameterDescriptor desc;
     desc.description = "Sonar tilt (pitch) in degrees. Positive = tilt downward.";
-    declare_parameter<int>("sonar_pitch_deg", 0, desc);
+    declare_parameter<int>("sonar_pitch_deg", -90, desc);
   }
   // >>> END ADDED <<<
 
@@ -135,7 +135,7 @@ Ping360Sonar::Ping360Sonar(rclcpp::NodeOptions options)
   image.set__encoding("mono8");
   image.set__is_bigendian(0);
   scan.header.set__frame_id(frame);
-  scan.set__range_min(1.20);
+  scan.set__range_min(0.75);
   echo.header.set__frame_id(frame);
  
   // ROS interface

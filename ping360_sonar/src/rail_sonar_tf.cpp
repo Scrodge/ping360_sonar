@@ -63,14 +63,20 @@ public:
     timer_ = this->create_wall_timer(100ms, std::bind(&RailSonarTF::broadcast_transforms, this));
 
     // Subscribe to sonar_points
+    auto sensor_qos = rclcpp::SensorDataQoS();
     cloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-      "sonar_points", rclcpp::SensorDataQoS(),
+      "sonar_points", sensor_qos,
       std::bind(&RailSonarTF::cloudCallback, this, std::placeholders::_1));
+    intensity_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+      "sonar_points_intensity_sweep", sensor_qos,
+      std::bind(&RailSonarTF::intensityCallback, this, std::placeholders::_1));
 
     // Publishers (match QoS)
     auto cloud_qos = rclcpp::SensorDataQoS().reliable();
     cloud_pub_all_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("sonar_points_all", cloud_qos);
     cloud_pub_latest_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("sonar_points_latest", cloud_qos);
+    intensity_pub_all_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("sonar_points_intensity_all", cloud_qos);
+    intensity_pub_latest_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("sonar_points_intensity_latest", cloud_qos);
 
   }
 
@@ -121,6 +127,66 @@ private:
       ++it_x; ++it_y; ++it_z; ++it_rgb;
     }
     return cloud;
+  }
+
+  sensor_msgs::msg::PointCloud2 makeIntensityCloud(
+      const std::vector<std::array<float,4>>& pts,
+      const std::string& frame_id,
+      const rclcpp::Time& stamp)
+  {
+    sensor_msgs::msg::PointCloud2 cloud;
+    cloud.header.stamp = stamp;
+    cloud.header.frame_id = frame_id;
+    cloud.height = 1;
+    cloud.width = static_cast<uint32_t>(pts.size());
+    cloud.is_bigendian = false;
+    cloud.is_dense = false;
+
+    sensor_msgs::PointCloud2Modifier mod(cloud);
+    mod.setPointCloud2Fields(
+      4,
+      "x", 1, sensor_msgs::msg::PointField::FLOAT32,
+      "y", 1, sensor_msgs::msg::PointField::FLOAT32,
+      "z", 1, sensor_msgs::msg::PointField::FLOAT32,
+      "intensity", 1, sensor_msgs::msg::PointField::FLOAT32);
+    mod.resize(cloud.width);
+
+    sensor_msgs::PointCloud2Iterator<float> it_x(cloud, "x");
+    sensor_msgs::PointCloud2Iterator<float> it_y(cloud, "y");
+    sensor_msgs::PointCloud2Iterator<float> it_z(cloud, "z");
+    sensor_msgs::PointCloud2Iterator<float> it_i(cloud, "intensity");
+    for(const auto &p : pts)
+    {
+      *it_x = p[0];
+      *it_y = p[1];
+      *it_z = p[2];
+      *it_i = p[3];
+      ++it_x; ++it_y; ++it_z; ++it_i;
+    }
+    return cloud;
+  }
+
+  std::vector<std::array<float,4>> extractIntensityPoints(const sensor_msgs::msg::PointCloud2 &cloud)
+  {
+    std::vector<std::array<float,4>> pts;
+    const size_t total = cloud.width * cloud.height;
+    if(total == 0)
+      return pts;
+    pts.reserve(total);
+    sensor_msgs::PointCloud2ConstIterator<float> it_x(cloud, "x");
+    sensor_msgs::PointCloud2ConstIterator<float> it_y(cloud, "y");
+    sensor_msgs::PointCloud2ConstIterator<float> it_z(cloud, "z");
+    sensor_msgs::PointCloud2ConstIterator<float> it_i(cloud, "intensity");
+    for(size_t idx = 0; idx < total; ++idx, ++it_x, ++it_y, ++it_z, ++it_i)
+    {
+      const float x = *it_x;
+      const float y = *it_y;
+      const float z = *it_z;
+      if(!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+        continue;
+      pts.push_back({x, y, z, *it_i});
+    }
+    return pts;
   }
 
   // === Broadcast transforms (same logic) ===
@@ -253,6 +319,12 @@ private:
       rail_state_.store(RailState::WAITING_FOR_FIRST_SCAN);
       RCLCPP_INFO(this->get_logger(), "Rail moved to %.3f m. Waiting for stationary scan.", v);
     }
+  }
+
+  void intensityCallback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud)
+  {
+    std::lock_guard<std::mutex> lk(intensity_mtx_);
+    last_intensity_cloud_ = cloud;
   }
 
 
@@ -389,6 +461,50 @@ private:
       all_pts.insert(all_pts.end(), v.begin(), v.end());
     auto all_cloud = makeColoredCloud(all_pts, "world", cloud_world.header.stamp, 255, 255, 255);
     cloud_pub_all_->publish(all_cloud);
+
+    RCLCPP_INFO(this->get_logger(), "Stored scan #%zu at %.3f m (points=%zu)",
+                saved_scans_.size()-1, pending_rail_pos_m_, saved_scans_.back().size());
+
+    // --- Process intensity cloud (downsampled) in lockstep with positional scans ---
+    sensor_msgs::msg::PointCloud2 latest_intensity;
+    {
+      std::lock_guard<std::mutex> lk(intensity_mtx_);
+      if (last_intensity_cloud_)
+        latest_intensity = *last_intensity_cloud_;
+    }
+
+    if (latest_intensity.width * latest_intensity.height > 0)
+    {
+      sensor_msgs::msg::PointCloud2 intensity_world;
+      bool transformed = true;
+      try
+      {
+        tf2::doTransform(latest_intensity, intensity_world, transform);
+      }
+      catch (tf2::TransformException &ex)
+      {
+        RCLCPP_WARN(this->get_logger(), "Intensity TF failed: %s", ex.what());
+        transformed = false;
+      }
+
+      if(!transformed)
+        return;
+
+      auto intensity_pts = extractIntensityPoints(intensity_world);
+      if(!intensity_pts.empty())
+      {
+        if (saved_intensity_scans_.size() >= max_saved_scans_)
+          saved_intensity_scans_.erase(saved_intensity_scans_.begin());
+        saved_intensity_scans_.push_back(intensity_pts);
+
+        intensity_pub_latest_->publish(makeIntensityCloud(intensity_pts, "world", cloud_world.header.stamp));
+
+        std::vector<std::array<float,4>> all_intensity_pts;
+        for (const auto &scan : saved_intensity_scans_)
+          all_intensity_pts.insert(all_intensity_pts.end(), scan.begin(), scan.end());
+        intensity_pub_all_->publish(makeIntensityCloud(all_intensity_pts, "world", cloud_world.header.stamp));
+      }
+    }
   }
 
 
@@ -413,12 +529,18 @@ private:
   size_t max_saved_scans_ = 200;
 
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr intensity_sub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_all_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_latest_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr intensity_pub_all_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr intensity_pub_latest_;
 
   std::atomic<bool> pending_save_;
   double pending_rail_pos_m_;
   std::mutex save_mtx_;
+  std::mutex intensity_mtx_;
+  sensor_msgs::msg::PointCloud2::SharedPtr last_intensity_cloud_;
+  std::vector<std::vector<std::array<float,4>>> saved_intensity_scans_;
 };
 
 int main(int argc, char * argv[])
