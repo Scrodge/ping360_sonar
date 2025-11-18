@@ -233,7 +233,7 @@ private:
   // === Serial handling ===
   bool openSerial()
   {
-    serial_fd_ = ::open(serial_port_.c_str(), O_RDONLY | O_NOCTTY | O_NONBLOCK);
+    serial_fd_ = ::open(serial_port_.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (serial_fd_ < 0) return false;
     struct termios tty;
     if (tcgetattr(serial_fd_, &tty) != 0) { ::close(serial_fd_); serial_fd_ = -1; return false; }
@@ -325,6 +325,27 @@ private:
   {
     std::lock_guard<std::mutex> lk(intensity_mtx_);
     last_intensity_cloud_ = cloud;
+  }
+
+  bool sendMovementTrigger(const std::string &command = "NEXT\n")
+  {
+    if (serial_fd_ < 0)
+    {
+      RCLCPP_WARN(this->get_logger(), "Serial port not open; cannot send trigger command.");
+      return false;
+    }
+    if (command.empty())
+      return false;
+
+    std::lock_guard<std::mutex> lk(serial_write_mtx_);
+    ssize_t written = ::write(serial_fd_, command.c_str(), command.size());
+    if (written < 0)
+    {
+      RCLCPP_ERROR(this->get_logger(), "Failed to write trigger command: %s", std::strerror(errno));
+      return false;
+    }
+    RCLCPP_DEBUG(this->get_logger(), "Sent trigger command to rail controller: %s", command.c_str());
+    return true;
   }
 
 
@@ -505,12 +526,16 @@ private:
         intensity_pub_all_->publish(makeIntensityCloud(all_intensity_pts, "world", cloud_world.header.stamp));
       }
     }
+
+    if (!sendMovementTrigger())
+      RCLCPP_WARN(this->get_logger(), "Unable to send NEXT trigger to Arduino.");
   }
 
 
 
   enum class RailState { MOVING, WAITING_FOR_FIRST_SCAN, READY_TO_SAVE };
-  std::atomic<RailState> rail_state_{RailState::MOVING};
+  // Start in WAITING_FOR_FIRST_SCAN so the very first full scan pair is captured.
+  std::atomic<RailState> rail_state_{RailState::WAITING_FOR_FIRST_SCAN};
   // === Variables ===
   rclcpp::TimerBase::SharedPtr timer_;
   std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
@@ -541,6 +566,7 @@ private:
   std::mutex intensity_mtx_;
   sensor_msgs::msg::PointCloud2::SharedPtr last_intensity_cloud_;
   std::vector<std::vector<std::array<float,4>>> saved_intensity_scans_;
+  std::mutex serial_write_mtx_;
 };
 
 int main(int argc, char * argv[])
